@@ -1,204 +1,141 @@
-# Ghidra_AntiDebugSeeker  
+# Ghidra AntiDebugSeeker Plus (WIP)
 
-## Introduction
+**A Ghidra script and plugin for identifying anti-debugging techniques in malware.**
 
-This tool is the Ghidra version of [AntiDebugSeeker](https://github.com/LAC-Japan/IDA_Plugin_AntiDebugSeeker).  
-It can be used in two ways: as a Ghidra Script and as a module.  
+This tool is a complete refactor of the original [AntiDebugSeeker IDA Plugin](https://github.com/LAC-Japan/IDA_Plugin_AntiDebugSeeker) by LAC, adapted and enhanced for Ghidra. It helps analysts automatically extract potential anti-debugging methods used by malware, making analysis more efficient.
 
-Through this tool, users can automatically extract potential anti-debugging methods used by malware, making it easier for analysts to take appropriate action.  
-
-The main functionalities of this plugin are as follows:
-
-- Extraction of Windows API that are potentially being used for anti-debugging by the malware  
-  (All subsequent API represent the Windows API)  
-- In addition to API, extraction of anti-debugging techniques based on key phrases that serve as triggers, as some anti-debugging methods cannot be comprehensively identified by API calls alone.
-
-Additionally, the file that defines the detection rules is designed to easily add keywords you want to detect.  
-This allows analysts to easily add new detection rules or make changes.  
-  
-For packed malware, running this plugin after unpacking and fixing the Import Address Table is more effective.  
-
+It can be used in two ways:
+1.  As a standalone **Ghidra Script** (`.java`).
+2.  As an integrated **Ghidra Module Extension** (Plugin).
 
 <p align="center">
-  <img src="pictures/Ghidra_AntiDebugSeeker.gif" alt="AntiDebugSeeker" width="600"/>
+  <img src="pictures/Ghidra_AntiDebugSeeker.gif" alt="Ghidra AntiDebugSeeker Plus Demo" width="600"/>
 </p>
+
+## Key Features
+
+* **API Detection:** Extracts potential anti-debugging Windows API calls used by the malware.
+* **Technique Detection:** Identifies anti-debugging techniques based on configurable keyword sequences, catching methods not solely identifiable by API calls.
+* **Customizable Rules:** Easily add or modify detection rules (APIs and keyword techniques) via configuration files.
+* **Clear Results:** Presents findings clearly through console output, bookmarks, and optional GUI elements (extension mode).
+* **Code Annotation:** Marks detected locations directly in the disassembly view with colors and comments.
+
+*Note: For packed malware, running this tool after unpacking and fixing the Import Address Table (IAT) yields better results.*
 
 ## Requirements
 
-Ghidra Version 11.0.1  
-(For Ghidra Extension : ghidra_11.0.1_AntiDebugSeeker.zip)  
+* **Ghidra:** Version 11.0.1 or compatible.
 
-## Files Required to Run the Program  
+## Core Files
 
- 1. AntiDebugSeeker.java (Ghidra Script)/    
-    ghidra_11.0.1_AntiDebugSeeker.zip (Zip Folder containing the compiled files including AntiDebugSeekerPlugin.java : Ghidra Module Extension)
-    
- 2. anti_debug_Ghidra.config (Converted for Ghidra : A file containing rules for detecting anti-debugging techniques)
-  
- 3. anti_debug_techniques_descriptions_Ghidra.json (Converted for Ghidra : A file containing descriptions of the detected rules)
+You'll need the following files depending on your usage method:
 
-## anti_debug_Ghidra.config and anti_debug_techniques_descriptions_Ghidra.json 
+1.  **Usage Mode Files:**
+    * **Script:** `AntiDebugSeeker.java`
+    * **Extension:** `ghidra_11.0.1_AntiDebugSeeker.zip` (Contains the compiled plugin)
+2.  **Configuration File:**
+    * `anti_debug_Ghidra.config` - Defines the detection rules (APIs and techniques).
+3.  **Description File:**
+    * `anti_debug_techniques_descriptions_Ghidra.json` - Contains descriptions for technique-based rules, shown in comments.
 
-There are sections named Anti_Debug_API and Anti_Debug_Technique.  
+## Configuration Files
 
-- **Anti_Debug_API**  
+These files allow you to customize the detection logic:
 
-you can freely create categories and add APIs that you wish to detect. **(exact match)**  
+### `anti_debug_Ghidra.config`
 
-<img src="pictures/HowToWriteAnti_Debug_API_Section.png" alt="HowToWriteAnti_Debug_API_Section" width="380"/>
+This file contains two main sections: `[Anti_Debug_API]` and `[Anti_Debug_Technique]`.
 
-- **Anti_Debug_Technique**  
+* **`[Anti_Debug_API]` Section:**
+    * Define categories and list Windows API names to detect.
+    * Detection uses **exact matching**.
+    <p align="center">
+      <img src="pictures/HowToWriteAnti_Debug_API_Section.png" alt="Anti_Debug_API Section Example" width="380"/>
+    </p>
 
-You can set between one to three keywords. **(partial match)**  
+* **`[Anti_Debug_Technique]` Section:**
+    * Define rules using sequences of one to three keywords.
+    * Detection uses **partial matching** within a defined search range.
+    * **Search Flow:**
+        1.  Find the first keyword.
+        2.  If found, search for the second keyword within a specified range (default: `80` bytes).
+        3.  If found, search for the third keyword within the range relative to the second keyword.
+    <p align="center">
+      <img src="pictures/HowToWriteAnti_Debug_Technique_Section.png" alt="Anti_Debug_Technique Section Example" width="430"/>
+    </p>
+    * **Custom Search Range:** To override the default range for a specific rule, append `search_range=<value>` to a keyword line.
+    <p align="center">
+      <img src="pictures/Custom_SearchRange.png" alt="Custom Search Range Example" width="380"/>
+    </p>
 
-The basic flow of the search is as follows:  
-First, search for the first keyword. If it is found, search within the specified number of bytes (default is 80 bytes) for the second keyword.  
-The same process is then applied for searching for the third keyword.  
+### `anti_debug_techniques_descriptions_Ghidra.json`
 
-<img src="pictures/HowToWriteAnti_Debug_Technique_Section.png" alt="HowToWriteAnti_Debug_Technique_Section" width="430"/>
+* Provides descriptive text for rules defined in the `[Anti_Debug_Technique]` section of the `.config` file.
+* These descriptions appear as POST comments in the Ghidra disassembly view for detected techniques.
+<p align="center">
+  <img src="pictures/anti_debug_techniques_descriptions.png" alt="Technique Descriptions JSON Example" width="600"/>
+</p>
 
-If you want to set a **custom search range** instead of using the default value, you can specify 'search_range=value' at the end of the keyword you've set.  
-This allows you to change the search range for each rule you've configured.
+## Installation and Usage
 
-<img src="pictures/Custom_SearchRange.png" alt="AntiDebugTechnique_Search_Range" width="380"/>  
+Choose the method that suits your workflow:
 
-anti_debug_techniques_descriptions.json contains the descriptions of the rules defined in the Anti_Debug_Technique section.  
-The values defined in this file can be referenced on the disassembly screen, allowing you to check the descriptions of the rules.  
+### Method 1: Using as a Ghidra Script
 
-<img src="pictures/anti_debug_techniques_descriptions.png" alt="anti_debug_techniques_descriptions" width="600"/>
+1.  **Placement:** Place `AntiDebugSeeker.java`, `anti_debug_Ghidra.config`, and `anti_debug_techniques_descriptions_Ghidra.json` in your Ghidra scripts directory.
+2.  **Execution:**
+    * Open Ghidra's `Script Manager`.
+    * Navigate to and select `AntiDebugSeeker.java`.
+    * Click the "Run Script" button (green play icon).
+    * You will be prompted twice:
+        * First, select your `anti_debug_Ghidra.config` file.
+        * Second, select your `anti_debug_techniques_descriptions_Ghidra.json` file.
+3.  **Results:** View detection results in the `Console - Scripting` window and via `Bookmarks`.
 
-## Ghidra Script How to Run
+### Method 2: Using as a Ghidra Extension (Plugin)
 
-  Script Manager > AntiDebugSeeker.java > Run Script  
-  
-  When the script is executed, a message saying "Select the Configuration File" is displayed,   
-  so specify the anti_debug_Ghidra.config that defines the detection rules, then click Open.  
+1.  **Installation:**
+    * In Ghidra, go to `File` -> `Install Extensions...`.
+    * Click the green `+` icon ("Add extension").
+    * Navigate to and select the `ghidra_11.0.1_AntiDebugSeeker.zip` file.
+    * Ensure the `AntiDebugSeeker` extension is checked in the list.
+    * Click `OK`. You will need to restart Ghidra.
+2.  **Execution:**
+    * Once Ghidra restarts and your project is open, go to `Window` -> `AntiDebugSeekerPlugin`. This opens the plugin's GUI panel.
+    <p align="center"><img src="pictures/How_to_setup_and_Execute_module_3.png" alt="Accessing the Plugin Window" ></p>
+    * Click the `Start Analyze` button in the plugin panel.
+    <p align="center"><img src="pictures/How_to_setup_and_Execute_module_4.png" alt="Plugin Panel - Start Analyze" ></p>
+    * You will be prompted twice (similar to the script method):
+        * Select your `anti_debug_Ghidra.config` file.
+        * Select your `anti_debug_techniques_descriptions_Ghidra.json` file.
+    <p align="center"><img src="pictures/How_to_setup_and_Execute_module_5.png" alt="File Selection Prompt" ></p>
+    * A progress bar (with a dragon!) will appear. Wait for the "Analysis Complete" message.
+    <p align="center"><img src="pictures/How_to_setup_and_Execute_module_6.png" alt="Analysis Progress and Completion" ></p>
+3.  **Results:** View detection results in the plugin panel's `Text Area`, via `Bookmarks`, and through annotations in the disassembly view.
 
-  After selecting the config file, a message saying "Select the JSON Description File" is displayed,  
-  so specify the anti_debug_technique_descriptions_Ghidra.json, which contains the descriptions of the detection rules, and click Open.  
+## Understanding the Results
 
-## Ghidra Extension How to Setup and Execute
+Both methods provide results in several ways:
 
-**Initial Setup**  
+* **Console / Text Area:**
+    * **Script:** Results are printed to the `Console - Scripting` window.
+    * **Extension:** Results appear in the plugin panel's `Text Area`.
+        * **`Display only the detection results` Button:** Filters the output to show only the lines where detections occurred.
+        <p align="center"><img src="pictures/Verifing_the_results_1.png" alt="GUI - Display Only Detections" ></p>
+        * **`Detected Function List` Button:** Groups the detected results by the function in which they were found, helping prioritize analysis.
+        <p align="center"><img src="pictures/Verifing_the_results_2.png" alt="GUI - Detected Function List" ></p>
 
-  File > Configure > Check Examples > Click Configure > Check AntiDebugSeekerPlugin > Click Ok  
+* **Bookmarks:**
+    * Detected APIs are bookmarked under the `Potential of Anti Debug API` category.
+    * Detected techniques are bookmarked under the `Anti Debug Technique` category.
+    <p align="center"><img src="pictures/Verifing_the_results_3.png" alt="Bookmarks View" ></p>
 
-  ![How_to_setup_and_Execute_module_1](pictures/How_to_setup_and_Execute_module_1.png)  
+* **Disassembly View Annotations:**
+    * **API Detections:** Background color is set to **green**. The rule name (API category) is added as a `PRE comment`.
+    <p align="center"><img src="pictures/Detected_Keywords_1.png" alt="API Detection Annotation" ></p>
+    * **Technique Detections:** Background color is set to **orange**. The rule name is added as a `PRE comment`. The description from the `.json` file is added as a `POST comment`.
+    <p align="center"><img src="pictures/Detected_Keywords_2.png" alt="Technique Detection Annotation" ></p>
 
-  ![How_to_setup_and_Execute_module_2](pictures/How_to_setup_and_Execute_module_2.png)  
-  
-**How to Execute**  
+## List of Detectable Techniques (Default Rules)
 
-  Window > AntiDebugSeekerPlugin  
-
-  ![How_to_setup_and_Execute_module_3](pictures/How_to_setup_and_Execute_module_3.png)  
-  
-  Click Start Analyze Button  
-
-  ![How_to_setup_and_Execute_module_4](pictures/How_to_setup_and_Execute_module_4.png) 
-  
-**The GUI interface launches.**  
-  
-  "Select the Config File" is displayed, so specify the anti_debug_Ghidra.config that defines the detection rules, then click Open.  
-  "Select the JSON Description File" is displayed, so specify the anti_debug_technique_descriptions_Ghidra.json,   
-  which contains the descriptions of the detection rules, and click Open.  
-
-  ![How_to_setup_and_Execute_module_5](pictures/How_to_setup_and_Execute_module_5.png)   
-  
-  A progress bar is displayed alongside a moving dragon.  
-  When the analysis is complete, "Analysis Complete" will be displayed.  
-
-  ![How_to_setup_and_Execute_module_6](pictures/How_to_setup_and_Execute_module_6.png)   
-  
-  The detection results can be checked from the GUI interface TextArea or Bookmarks.  
-
-  ## Verifying the results (Ghidra Script + Module Extension)  
-
-  **Ghidra Script: Check Console-Scripting**  
-  The results of the detection can be checked from the Console - Scripting screen.   
-  When AntiDebugSeeker Process Finished is displayed, it signals that the process has completed.  
-
-  **Ghidra Module Extension : Check Text Area**  
-  The results of the detection can be checked from Text Area.  
-  
-  - **Display only the detection results Button**  
-    You can display only the detected results from the outcomes shown by pressing the Start Analyze button.     
-
-  ![Verifing_the_results_1](pictures/Verifing_the_results_1.png)  
-    
-  - **Detected Function List Button**  
-  From the results of either the Start Analyze button or the Display only the detection results button,  
-  the outcomes are displayed grouped by function.  
-  It becomes easier for the user to understand from which function to start checking.  
-
-  ![Verifing_the_results_2](pictures/Verifing_the_results_2.png) 
-
-**Ghidra Script / Module Extension : Check Bookmarks**   
-You can check where all the keywords are being detected and view the detection results  
-from the "Potential of Anti Debug API" category and the "Anti Debug Technique" section.
-
-  ![Verifing_the_results_3](pictures/Verifing_the_results_3.png) 
-
-  ## Ghidra Script / Module Extension : Detected Keywords Color and PRE,POST Comment
-    
-  Items detected by the Anti Debug API will have a green background color, and the rule name will be set as a PRE comment.  
-
-  ![Detected_Keywords_1](pictures/Detected_Keywords_1.png) 
-    
-  Items detected by the Anti Debug Technique will have an orange background color, and the rule name will be set as a PRE comment.   
-  The details of the rule will be displayed as a POST comment from the data of the loaded JSON file.  
-
-  ![Detected_Keywords_2](pictures/Detected_Keywords_2.png)
-
-  ## List of detectable anti-debugging techniques  
-
-The following is a list of rule names defined in the Anti_Debug_Technique section of the anti_debug_Ghidra.config.  
-
-VMware_I/O_port  
-VMware_magic_value  
-HeapTailMarker  
-KernelDebuggerMarker  
-DbgBreakPoint_RET  
-DbgUiRemoteBreakin_Debugger_Terminate  
-PMCCheck_RDPMC  
-TimingCheck_RDTSC  
-SkipPrefixes_INT1  
-INT2D_interrupt_check  
-INT3_interrupt_check  
-EXCEPTION_BREAKPOINT  
-ICE_interrupt_check  
-DBG_PRINTEXCEPTION_C  
-TrapFlag_SingleStepException  
-BeingDebugged_check  
-NtGlobalFlag_check  
-NtGlobalFlag_check_2  
-HeapFlags  
-HeapForceFlags  
-Combination_of_HEAP_Flags  
-Combination_of_HEAP_Flags_2  
-ReadHeapFlags  
-ReadHeapFlags_2  
-DebugPrivileges_Check
-CreateMutex_AlreadyExist  
-CreateEvent_AlreadyExist  
-Opened_Exclusively_Check  
-EXCEPTION_INVALID_HANDLE_1  
-EXCEPTION_INVALID_HANDLE_2  
-Memory_EXECUTE_READWRITE_1  
-Memory_EXECUTE_READWRITE_2  
-Memory_Region_Tracking  
-Check_BreakPoint_Memory_1  
-Check_BreakPoint_Memory_2  
-Software_Breakpoints_Check  
-Hardware_Breakpoints_Check  
-ChildProcess_Check  
-Enumerate_Running_Processes  
-ThreadHideFromDebugger  
-NtQueryInformationProcess_PDPort  
-NtQueryInformationProcess_PDFlags  
-NtQueryInformationProcess_PDObjectHandle  
-NtQuerySystemInformation_KD_Check  
-Extract_Resource_Section  
-Commucate_function_String  
-Commucate_function  
-
+The default `anti_debug_Ghidra.config` includes rules for the following techniques (defined in `[Anti_Debug_Technique]`):
