@@ -1,6 +1,5 @@
 package antidebugseeker;
 
-// --- Necessary Imports (Ignoring resolution errors) ---
 import ghidra.program.model.address.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.*;
@@ -10,55 +9,69 @@ import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 import ghidra.util.NumericUtilities;
-
+import ghidra.framework.plugintool.ServiceProvider;
 import java.awt.Color;
-import java.io.BufferedWriter;
-import java.io.FileWriter;
 import java.io.IOException;
-import java.io.PrintWriter;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.function.Consumer;
+import ghidra.program.model.symbol.SymbolIterator;
+import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.ReferenceIterator;
+import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.symbol.SymbolTable;
+import ghidra.program.model.symbol.FunctionIterator;
+import antidebugseeker.CsvResultWriter; // Import CsvResultWriter
+import antidebugseeker.AntiDebugConfig.InstructionRule; // Import inner class
+import antidebugseeker.AntiDebugConfig.InstructionStep; // Import inner class
+import antidebugseeker.AntiDebugConfig.OperandCheck; // Import inner class
+
 // --- End Imports ---
 
 /**
  * Core analysis engine for the AntiDebugSeeker plugin.
  * Performs searches for API calls, keyword patterns, instructions, and byte sequences.
+ * Extended version includes API label reference search and keyword cross-reference checks.
  */
 public class AntiDebugAnalysisCore {
 
     // --- Constants ---
     private static final Color API_COLOR = new Color(173, 255, 47, 128); // Light green (semi-transparent)
+    private static final Color API_LABEL_COLOR = new Color(144, 238, 144, 128); // Lighter green for API Label Refs
     private static final Color PATTERN_PRIMARY_COLOR = new Color(255, 165, 0, 128); // Orange (semi-transparent)
     private static final Color PATTERN_SECONDARY_COLOR = new Color(255, 200, 120, 128); // Lighter orange (semi-transparent)
+    private static final Color INSTRUCTION_COLOR = new Color(255, 105, 180, 128); // Hot pink (semi-transparent)
+    private static final Color BYTES_COLOR = new Color(135, 206, 250, 128); // Light sky blue (semi-transparent)
+
     private static final String BOOKMARK_CATEGORY_API = "AntiDebug API";
+    private static final String BOOKMARK_CATEGORY_API_LABEL = "AntiDebug API Label Ref"; // New category
     private static final String BOOKMARK_CATEGORY_PATTERN = "AntiDebug Pattern";
+    private static final String BOOKMARK_CATEGORY_PATTERN_XREF = "AntiDebug Pattern (XRef)"; // New category
     private static final String BOOKMARK_CATEGORY_PATTERN_PART = "Pattern Part";
-    private static final String BOOKMARK_CATEGORY_INSTRUCTION = "AntiDebug Instruction"; // Example
-    private static final String BOOKMARK_CATEGORY_BYTES = "AntiDebug Bytes";       // Example
+    private static final String BOOKMARK_CATEGORY_INSTRUCTION = "AntiDebug Instruction";
+    private static final String BOOKMARK_CATEGORY_BYTES = "AntiDebug Bytes";
 
     /** Private constructor to prevent instantiation. */
     private AntiDebugAnalysisCore() {}
 
+    /** Represents the severity level of a finding. */
+    public enum Severity { INFO, LOW, MEDIUM, HIGH, CRITICAL }
+
     /** Represents a single finding during analysis. */
-    private record Finding(
+    public record Finding(
         Address address,
-        String type, // e.g., "API", "Keyword Group", "Instruction", "Bytes"
-        String ruleName, // Name of the API, Keyword Group, etc.
-        String description,
+        String type, // e.g., "API", "API Label Ref", "Keyword Group", "Keyword Group (XRef)", "Instruction Sequence", "Bytes"
+        String ruleName, // Name of the rule/API/keyword group/byte sequence that triggered the finding
+        Severity severity,
+        String description, // Detailed description from JSON or generated
         String functionContext // Name of the containing function, or "N/A"
     ) {
         /** Creates a Finding, ensuring non-null values where appropriate. */
-        Finding {
+        public Finding {
             Objects.requireNonNull(address, "Finding address cannot be null");
             Objects.requireNonNull(type, "Finding type cannot be null");
             Objects.requireNonNull(ruleName, "Finding ruleName cannot be null");
+            Objects.requireNonNull(severity, "Finding severity cannot be null");
             description = (description != null) ? description : ""; // Allow empty description
             functionContext = (functionContext != null && !functionContext.isBlank()) ? functionContext : "N/A";
         }
@@ -74,24 +87,24 @@ public class AntiDebugAnalysisCore {
      * @throws CancelledException If the analysis is cancelled by the user.
      */
     public static void analyzeProgram(Program program, AntiDebugConfig config, Consumer<String> logger, TaskMonitor monitor) throws CancelledException {
-        logger.accept("Starting Anti-Debug Analysis...");
+        logger.accept("Starting Anti-Debug Analysis...\n");
         List<Finding> findings = new ArrayList<>(); // Store all findings
 
         // --- Perform Enabled Analyses ---
         if (config.isAnalyzeApiCallsEnabled()) {
-            monitor.setMessage("Analyzing API Calls...");
+            monitor.setMessage("Analyzing API Calls & Labels..."); // Updated message
             analyzeApiCalls(program, config, logger, monitor, findings);
             monitor.checkCancelled();
         } else {
-            logger.accept("Skipping API Call analysis (disabled in config).");
+            logger.accept("Skipping API Call/Label analysis (disabled in config).\n");
         }
 
         if (config.isAnalyzeKeywordsEnabled()) {
-            monitor.setMessage("Analyzing Keyword Patterns...");
+            monitor.setMessage("Analyzing Keyword Patterns (Direct & XRef)..."); // Updated message
             analyzeKeywordPatterns(program, config, logger, monitor, findings);
             monitor.checkCancelled();
         } else {
-            logger.accept("Skipping Keyword Pattern analysis (disabled in config).");
+            logger.accept("Skipping Keyword Pattern analysis (disabled in config).\n");
         }
 
         if (config.isAnalyzeInstructionsEnabled()) {
@@ -99,7 +112,7 @@ public class AntiDebugAnalysisCore {
             analyzeInstructions(program, config, logger, monitor, findings);
             monitor.checkCancelled();
         } else {
-            logger.accept("Skipping Instruction analysis (disabled in config).");
+            logger.accept("Skipping Instruction analysis (disabled in config).\n");
         }
 
         if (config.isAnalyzeBytesEnabled()) {
@@ -107,33 +120,33 @@ public class AntiDebugAnalysisCore {
             analyzeBytes(program, config, logger, monitor, findings);
             monitor.checkCancelled();
         } else {
-             logger.accept("Skipping Byte Sequence analysis (disabled in config).");
+             logger.accept("Skipping Byte Sequence analysis (disabled in config).\n");
         }
 
         // --- Finalize and Report ---
-        logger.accept("\nAnalysis Complete.");
-        logger.accept("--- Summary ---");
-        logger.accept(String.format(" - API Patterns Searched: %d (%s)", config.getApiCalls().size(), config.isAnalyzeApiCallsEnabled() ? "Enabled" : "Disabled"));
-        logger.accept(String.format(" - Keyword Groups Searched: %d (%s)", config.getKeywordGroups().size(), config.isAnalyzeKeywordsEnabled() ? "Enabled" : "Disabled"));
-        logger.accept(String.format(" - Instruction Patterns Searched: %d (%s)", config.getInstructions().size(), config.isAnalyzeInstructionsEnabled() ? "Enabled" : "Disabled"));
-        logger.accept(String.format(" - Byte Sequences Searched: %d (%s)", config.getByteSequences().size(), config.isAnalyzeBytesEnabled() ? "Enabled" : "Disabled"));
-        logger.accept("Total Findings: " + findings.size());
-        logger.accept("See details above and Bookmarks panel for findings.");
+        logger.accept("\nAnalysis Complete.\n");
+        logger.accept("--- Summary ---\n");
+        logger.accept(String.format(" - API Rules Searched: %d (%s)\n", config.getApiCalls().size(), config.isAnalyzeApiCallsEnabled() ? "Enabled" : "Disabled"));
+        logger.accept(String.format(" - Keyword Groups Searched: %d (%s)\n", config.getKeywordGroups().size(), config.isAnalyzeKeywordsEnabled() ? "Enabled" : "Disabled"));
+        logger.accept(String.format(" - Instruction Rules Searched: %d (%s)\n", config.getInstructionRules().size(), config.isAnalyzeInstructionsEnabled() ? "Enabled" : "Disabled"));
+        logger.accept(String.format(" - Byte Sequences Searched: %d (%s)\n", config.getByteSequences().size(), config.isAnalyzeBytesEnabled() ? "Enabled" : "Disabled"));
+        logger.accept("Total Findings: " + findings.size() + "\n");
+        logger.accept("See details above and Bookmarks panel for findings.\n");
 
-        // --- CSV Output (New Feature) ---
+        // --- CSV Output ---
         if (config.isCsvOutputEnabled()) {
             monitor.setMessage("Writing results to CSV...");
             Path outputPath = config.getCsvOutputPath();
             if (outputPath != null) {
                 try {
                     CsvResultWriter.writeResults(outputPath, findings);
-                    logger.accept("Results successfully written to: " + outputPath);
+                    logger.accept("Results successfully written to: " + outputPath + "\n");
                 } catch (IOException e) {
-                    logger.accept("Error writing CSV results: " + e.getMessage());
+                    logger.accept("Error writing CSV results: " + e.getMessage() + "\n");
                     Msg.error(AntiDebugAnalysisCore.class, "Failed to write CSV results to " + outputPath, e);
                 }
             } else {
-                logger.accept("CSV output enabled, but no output path specified in config.");
+                logger.accept("CSV output enabled, but no output path specified in config.\n");
                 Msg.warn(AntiDebugAnalysisCore.class, "CSV output enabled but csv_output_path is not set in config.");
             }
         }
@@ -143,7 +156,7 @@ public class AntiDebugAnalysisCore {
     // Analysis Methods
     // =====================================================================================
 
-    /** Analyzes API calls based on the configuration. */
+    /** Analyzes API calls, function calls, and label references based on the configuration. */
     private static void analyzeApiCalls(Program program, AntiDebugConfig config, Consumer<String> logger, TaskMonitor monitor, List<Finding> findings) throws CancelledException {
         SymbolTable symbolTable = program.getSymbolTable();
         FunctionManager functionManager = program.getFunctionManager();
@@ -151,17 +164,18 @@ public class AntiDebugAnalysisCore {
         BookmarkManager bookmarkManager = program.getBookmarkManager();
         Listing listing = program.getListing();
 
-        logger.accept("\n--- Searching for API Calls ---");
+        logger.accept("\n--- Searching for API Calls, Functions & Label References ---\n");
         int apiFoundCount = 0;
+        Set<Address> reportedReferenceAddresses = new HashSet<>(); // Avoid duplicate reports for same location
 
         for (String apiName : config.getApiCalls()) {
             monitor.checkCancelled();
-            monitor.setMessage("API: " + apiName);
+            monitor.setMessage("API/Label: " + apiName);
             boolean foundAnyRefForThisApi = false;
 
-            // Search external symbols
+            // --- Search External Symbols (Imports) ---
             SymbolIterator externalSymbols = symbolTable.getExternalSymbolIterator(apiName);
-             while (externalSymbols.hasNext()) {
+            while (externalSymbols.hasNext()) {
                  monitor.checkCancelled();
                  Symbol extSym = externalSymbols.next();
                  ReferenceIterator refIter = referenceManager.getReferencesTo(extSym.getAddress());
@@ -169,19 +183,23 @@ public class AntiDebugAnalysisCore {
                      monitor.checkCancelled();
                      Reference ref = refIter.next();
                      Address refAddr = ref.getFromAddress();
+
+                     // Check if already reported
+                     if (!reportedReferenceAddresses.add(refAddr)) continue;
+
                      Function callingFunc = functionManager.getFunctionContaining(refAddr);
                      String funcName = getFunctionName(callingFunc);
                      String category = config.getApiCategory(apiName);
-                     String description = config.getRuleDescription(apiName); // Use unified description getter
+                     String description = config.getRuleDescription(apiName);
 
                      if (!foundAnyRefForThisApi) {
-                         logger.accept(String.format("Found API call '%s' (External Symbol):", apiName));
+                         logger.accept(String.format("Found references related to '%s':\n", apiName));
                          foundAnyRefForThisApi = true;
                      }
-                     logger.accept(String.format("  - 0x%s (in function %s)", refAddr, funcName));
+                     logger.accept(String.format("  - External Call at 0x%s (in function %s)\n", refAddr, funcName));
 
                      // Add Finding
-                     findings.add(new Finding(refAddr, "API", apiName, description, funcName));
+                     findings.add(new Finding(refAddr, "API", apiName, Severity.MEDIUM, description, funcName));
 
                      // Annotate
                      addBookmark(bookmarkManager, refAddr, BOOKMARK_CATEGORY_API + ": " + category, apiName + " - " + description);
@@ -191,29 +209,35 @@ public class AntiDebugAnalysisCore {
                  }
             }
 
+            // --- Search Internal Functions ---
             FunctionIterator functions = functionManager.getFunctions(true);
             while (functions.hasNext()) {
                 monitor.checkCancelled();
                 Function func = functions.next();
-                if (func.getName(true).equalsIgnoreCase(apiName)) { // Case-insensitive match
+                // Use getName(true) for namespace, check case-insensitively
+                if (func.getName(true).equalsIgnoreCase(apiName)) {
                      ReferenceIterator refIter = referenceManager.getReferencesTo(func.getEntryPoint());
                      while(refIter.hasNext()) {
                          monitor.checkCancelled();
                          Reference ref = refIter.next();
                          Address refAddr = ref.getFromAddress();
+
+                         // Check if already reported
+                         if (!reportedReferenceAddresses.add(refAddr)) continue;
+
                          Function callingFunc = functionManager.getFunctionContaining(refAddr);
                          String funcName = getFunctionName(callingFunc);
                          String category = config.getApiCategory(apiName);
                          String description = config.getRuleDescription(apiName);
 
                          if (!foundAnyRefForThisApi) {
-                             logger.accept(String.format("Found function matching API name '%s' at 0x%s, referenced by:", func.getName(true), func.getEntryPoint()));
+                             logger.accept(String.format("Found references related to '%s':\n", apiName));
                              foundAnyRefForThisApi = true;
                           }
-                         logger.accept(String.format("  - 0x%s (in function %s)", refAddr, funcName));
+                         logger.accept(String.format("  - Internal Call at 0x%s (in function %s)\n", refAddr, funcName));
 
                          // Add Finding
-                         findings.add(new Finding(refAddr, "API", apiName, description, funcName));
+                         findings.add(new Finding(refAddr, "API", apiName, Severity.MEDIUM, description, funcName));
 
                          // Annotate
                          addBookmark(bookmarkManager, refAddr, BOOKMARK_CATEGORY_API + ": " + category, apiName + " - " + description);
@@ -223,56 +247,106 @@ public class AntiDebugAnalysisCore {
                      }
                 }
             }
+
+            // --- Search Data Labels --- (New Functionality)
+            SymbolIterator labelSymbols = symbolTable.getSymbolIterator(apiName, true); // Find symbols by name
+             while (labelSymbols.hasNext()) {
+                 monitor.checkCancelled();
+                 Symbol labelSym = labelSymbols.next();
+                 // Only process if it's a LABEL symbol type
+                 if (labelSym.getSymbolType() == SymbolType.LABEL) {
+                     ReferenceIterator refIter = referenceManager.getReferencesTo(labelSym.getAddress());
+                     while(refIter.hasNext()){
+                         monitor.checkCancelled();
+                         Reference ref = refIter.next();
+                         Address refAddr = ref.getFromAddress();
+
+                         // Check if already reported
+                         if (!reportedReferenceAddresses.add(refAddr)) continue;
+
+                         Function callingFunc = functionManager.getFunctionContaining(refAddr);
+                         String funcName = getFunctionName(callingFunc);
+                         String category = config.getApiCategory(apiName);
+                         // Use a specific description or the generic one? Using generic for now.
+                         String description = config.getRuleDescription(apiName);
+
+                         if (!foundAnyRefForThisApi) {
+                             logger.accept(String.format("Found references related to '%s':\n", apiName));
+                             foundAnyRefForThisApi = true;
+                         }
+                         logger.accept(String.format("  - Label Ref at 0x%s (in function %s) -> Label '%s' at 0x%s\n",
+                                 refAddr, funcName, labelSym.getName(), labelSym.getAddress()));
+
+                         // Add Finding (Use distinct type)
+                         findings.add(new Finding(refAddr, "API Label Ref", apiName, Severity.LOW, // Lower severity for label refs?
+                                 "Reference to data label named '" + apiName + "'", funcName));
+
+                         // Annotate differently
+                         addBookmark(bookmarkManager, refAddr, BOOKMARK_CATEGORY_API_LABEL + ": " + category,
+                                 "Ref to Label: " + apiName + " - " + description);
+                         setPreComment(listing, refAddr, category + ": Ref to Label " + apiName);
+                         setBackgroundColor(program, refAddr, API_LABEL_COLOR); // Use different color
+                         apiFoundCount++;
+                     }
+                 }
+             }
         }
-         logger.accept("API Call search finished. Found " + apiFoundCount + " references.");
+         logger.accept("API/Function/Label search finished. Found " + apiFoundCount + " references.\n");
     }
 
-    /** Analyzes keyword patterns based on the configuration. */
+    /** Analyzes keyword patterns based on the configuration, including cross-reference checks. */
     private static void analyzeKeywordPatterns(Program program, AntiDebugConfig config, Consumer<String> logger, TaskMonitor monitor, List<Finding> findings) throws CancelledException {
         Listing listing = program.getListing();
         Memory memory = program.getMemory();
         BookmarkManager bookmarkManager = program.getBookmarkManager();
         FunctionManager functionManager = program.getFunctionManager();
+        ReferenceManager referenceManager = program.getReferenceManager(); // Needed for XRefs
 
-        logger.accept("\n--- Searching for Keyword Patterns ---");
+        logger.accept("\n--- Searching for Keyword Patterns (Direct & XRef) ---\n");
         int groupsFoundCount = 0;
-
-        // Optimization: Pre-filter groups to avoid checking disabled ones repeatedly? Not strictly needed yet.
+        Set<Address> annotatedPatternAddresses = new HashSet<>(); // Prevent duplicate annotations
 
         // Iterate through all executable code units
         AddressSetView addresses = memory.getExecuteSet();
         if (addresses.isEmpty()) {
-            logger.accept("No executable memory regions found to scan for keyword patterns.");
+            logger.accept("No executable memory regions found to scan for keyword patterns.\n");
             return;
         }
-        CodeUnitIterator codeUnits = listing.getCodeUnits(addresses, true);
+
+        // Use a map to store potential primary keyword hits and the groups they belong to
         Map<Address, List<AntiDebugConfig.KeywordGroup>> primaryKeywordHits = new LinkedHashMap<>();
 
         // Pass 1: Find all primary keywords
-        logger.accept("Scanning for primary keywords...");
+        logger.accept("Scanning for primary keywords...\n");
         monitor.setMessage("Scanning for primary keywords...");
+        CodeUnitIterator codeUnits = listing.getCodeUnits(addresses, true); // Iterate forward
         monitor.initialize(addresses.getNumAddresses()); // Progress based on addresses
         long progress = 0;
+
         while (codeUnits.hasNext() && !monitor.isCancelled()) {
             CodeUnit cu = codeUnits.next();
-            monitor.setProgress(++progress); // Update progress
+            if (cu.getMinAddress() != null) {
+                 try {
+                    progress = cu.getMinAddress().subtract(addresses.getMinAddress());
+                    monitor.setProgress(progress);
+                 } catch (AddressOverflowException e) { /* ignore progress update issue */ }
+            }
 
             for (AntiDebugConfig.KeywordGroup group : config.getKeywordGroups()) {
-                monitor.checkCancelled(); // Check inside inner loop too
-                String primaryKeyword = group.getPrimaryKeyword(); // Already checked for null/empty in config loading
+                monitor.checkCancelled();
+                String primaryKeyword = group.getPrimaryKeyword();
                 if (isKeywordFound(cu, primaryKeyword, program)) {
                     primaryKeywordHits.computeIfAbsent(cu.getAddress(), k -> new ArrayList<>()).add(group);
-                    // Don't break here, multiple groups might share the same primary keyword
                 }
             }
         }
-        logger.accept("Found " + primaryKeywordHits.size() + " potential primary keyword locations.");
+        logger.accept("Found " + primaryKeywordHits.size() + " potential primary keyword locations.\n");
         if (monitor.isCancelled()) throw new CancelledException();
 
-        // Pass 2: Search for secondary keywords from primary hits
-        logger.accept("Searching for secondary keywords from primary locations...");
-        monitor.setMessage("Searching for secondary keywords...");
-        monitor.initialize(primaryKeywordHits.size()); // Progress based on primary hits
+        // Pass 2: Search for subsequent keywords starting from primary hits (Direct & XRef)
+        logger.accept("Searching for subsequent keywords (Direct & XRef)...\n");
+        monitor.setMessage("Searching for subsequent keywords...");
+        monitor.initialize(primaryKeywordHits.size());
         progress = 0;
 
         for (Map.Entry<Address, List<AntiDebugConfig.KeywordGroup>> entry : primaryKeywordHits.entrySet()) {
@@ -282,175 +356,361 @@ public class AntiDebugAnalysisCore {
             List<AntiDebugConfig.KeywordGroup> potentialGroups = entry.getValue();
 
             for (AntiDebugConfig.KeywordGroup group : potentialGroups) {
-                monitor.checkCancelled(); // Check per group
+                monitor.checkCancelled();
                 monitor.setMessage("Checking group: " + group.getName() + " at " + primaryAddr);
 
                 Function func = functionManager.getFunctionContaining(primaryAddr);
                 String funcName = getFunctionName(func);
+                boolean foundDirectly = false; // Flag to track if found via direct search
 
+                // --- Handle Single Keyword Rules ---
                 if (group.getKeywords().size() == 1) {
-                    // Single keyword rule found
-                    logger.accept(String.format("Found Single keyword Rule '%s' ('%s') at 0x%s (in function %s)",
-                        group.getName(), group.getPrimaryKeyword(), primaryAddr, funcName));
-
-                    // Add Finding
-                    findings.add(new Finding(primaryAddr, "Keyword", group.getName(), group.getDescription(), funcName));
-
-                    // Annotate
-                    addBookmark(bookmarkManager, primaryAddr, BOOKMARK_CATEGORY_PATTERN + ": " + group.getName(), group.getDescription());
-                    setPostComment(listing, primaryAddr, group.getName() + ": " + group.getDescription());
-                    setBackgroundColor(program, primaryAddr, PATTERN_PRIMARY_COLOR);
-                    groupsFoundCount++;
-                } else {
-                    // Multi-keyword rule
-                    Address lastFoundAddr = primaryAddr;
-                    boolean allSecondaryFound = true;
-                    List<Address> foundAddresses = new ArrayList<>();
-                    foundAddresses.add(primaryAddr); // Add primary address
-
-                    for (int i = 1; i < group.getKeywords().size(); i++) {
-                        monitor.checkCancelled();
-                        String keyword = group.getKeywordByIndex(i);
-                        if (keyword == null) { // Should not happen with config validation
-                            allSecondaryFound = false;
-                            break;
-                        }
-                        // Start search *after* the last found address
-                        Address searchStart = lastFoundAddr.add(1); // Potential AddressOverflowException handled in findKeywordInRange
-                        Address nextAddr = findKeywordInRange(program, listing, searchStart, keyword, group.getSearchRange(), monitor);
-
-                        if (nextAddr != null) {
-                            lastFoundAddr = nextAddr;
-                            foundAddresses.add(nextAddr);
-                        } else {
-                            allSecondaryFound = false;
-                            break; // Missing a keyword in the sequence
-                        }
-                    }
-
-                    if (allSecondaryFound) {
-                        logger.accept(String.format("Found Keyword group '%s' starting at 0x%s (in function %s)",
-                            group.getName(), primaryAddr, funcName));
-                        for(int i=0; i<foundAddresses.size(); i++){
-                             logger.accept(String.format("  - Keyword '%s' found at 0x%s", group.getKeywordByIndex(i), foundAddresses.get(i)));
-                        }
-
-                        // Add Finding for the group start
-                        findings.add(new Finding(primaryAddr, "Keyword Group", group.getName(), group.getDescription(), funcName));
-
-                        // Annotate primary keyword
+                    if (annotatedPatternAddresses.add(primaryAddr)) { // Check if already annotated
+                        logger.accept(String.format("Found Single keyword Rule '%s' ('%s') at 0x%s (in function %s)\n",
+                            group.getName(), group.getPrimaryKeyword(), primaryAddr, funcName));
+                        findings.add(new Finding(primaryAddr, "Keyword", group.getName(), Severity.MEDIUM, group.getDescription(), funcName));
                         addBookmark(bookmarkManager, primaryAddr, BOOKMARK_CATEGORY_PATTERN + ": " + group.getName(), group.getDescription());
-                        setPostComment(listing, primaryAddr, group.getName() + ": " + group.getDescription());
+                        setPreComment(listing, primaryAddr, BOOKMARK_CATEGORY_PATTERN + ": " + group.getName());
+                        setPostComment(listing, primaryAddr, group.getDescription());
+                        setBackgroundColor(program, primaryAddr, PATTERN_PRIMARY_COLOR);
+                        groupsFoundCount++;
+                    }
+                    continue; // Move to next group for this primary address
+                }
+
+                // --- Handle Multi-Keyword Rules (Direct Search First) ---
+                Address lastFoundAddrDirect = primaryAddr;
+                boolean allSubsequentFoundDirect = true;
+                List<Address> foundAddressesDirect = new ArrayList<>();
+                foundAddressesDirect.add(primaryAddr);
+
+                for (int i = 1; i < group.getKeywords().size(); i++) {
+                    monitor.checkCancelled();
+                    String keywordToFind = group.getKeywordByIndex(i);
+                    Address searchStart = lastFoundAddrDirect.add(1);
+                    Address nextAddr = findKeywordInRange(program, listing, searchStart, keywordToFind, group.getSearchRange(), monitor);
+
+                    if (nextAddr != null) {
+                        lastFoundAddrDirect = nextAddr;
+                        foundAddressesDirect.add(nextAddr);
+                    } else {
+                        allSubsequentFoundDirect = false;
+                        break;
+                    }
+                }
+
+                if (allSubsequentFoundDirect) {
+                    foundDirectly = true; // Mark as found directly
+                    if (annotatedPatternAddresses.add(primaryAddr)) { // Only report/annotate if primary hasn't been part of another reported pattern
+                        logger.accept(String.format("Found Keyword group '%s' (Direct) starting at 0x%s (in function %s)\n",
+                            group.getName(), primaryAddr, funcName));
+                        findings.add(new Finding(primaryAddr, "Keyword Group", group.getName(), Severity.HIGH, group.getDescription(), funcName));
+                        addBookmark(bookmarkManager, primaryAddr, BOOKMARK_CATEGORY_PATTERN + ": " + group.getName(), group.getDescription());
+                        setPreComment(listing, primaryAddr, BOOKMARK_CATEGORY_PATTERN + ": " + group.getName());
+                        setPostComment(listing, primaryAddr, group.getDescription());
                         setBackgroundColor(program, primaryAddr, PATTERN_PRIMARY_COLOR);
 
-                        // Annotate secondary keywords
-                        for (int i = 1; i < foundAddresses.size(); i++) {
-                             addBookmark(bookmarkManager, foundAddresses.get(i), BOOKMARK_CATEGORY_PATTERN_PART + ": " + group.getName(), "Keyword: " + group.getKeywordByIndex(i));
-                             setBackgroundColor(program, foundAddresses.get(i), PATTERN_SECONDARY_COLOR);
+                        for (int i = 1; i < foundAddressesDirect.size(); i++) {
+                             Address subsequentAddr = foundAddressesDirect.get(i);
+                             logger.accept(String.format("  - Keyword '%s' found at 0x%s\n", group.getKeywordByIndex(i), subsequentAddr));
+                             if (annotatedPatternAddresses.add(subsequentAddr)) { // Avoid re-annotating secondary hits too
+                                addBookmark(bookmarkManager, subsequentAddr, BOOKMARK_CATEGORY_PATTERN_PART + ": " + group.getName(), "Keyword: " + group.getKeywordByIndex(i));
+                                setBackgroundColor(program, subsequentAddr, PATTERN_SECONDARY_COLOR);
+                             }
                         }
                         groupsFoundCount++;
                     }
-                    // TODO: Implement cross-reference search as an alternative if direct search fails.
                 }
-            } // end loop through potential groups for this address
+
+                // --- Cross-Reference Check (Only if Direct Search Failed) --- (New Functionality)
+                if (!foundDirectly && group.getKeywords().size() > 1) {
+                    monitor.setMessage("Checking XRefs for group: " + group.getName() + " from " + primaryAddr);
+                    ReferenceIterator refIter = referenceManager.getReferencesTo(primaryAddr);
+                    boolean foundViaXref = false;
+
+                    while(refIter.hasNext() && !monitor.isCancelled()){
+                        Reference ref = refIter.next();
+                        Address xrefAddr = ref.getFromAddress(); // Address where the primary keyword is referenced from
+
+                        // Now, try the sequence search starting strictly AFTER the cross-reference location
+                        Address lastFoundAddrXref = xrefAddr;
+                        boolean allSubsequentFoundXref = true;
+                        List<Address> foundAddressesXref = new ArrayList<>();
+                        foundAddressesXref.add(xrefAddr); // Start sequence from the xref location
+
+                        for (int i = 1; i < group.getKeywords().size(); i++) { // Start checking from the SECOND keyword
+                            monitor.checkCancelled();
+                            String keywordToFind = group.getKeywordByIndex(i);
+                            Address searchStart = lastFoundAddrXref.add(1); // Search after previous hit in this xref sequence
+                            Address nextAddr = findKeywordInRange(program, listing, searchStart, keywordToFind, group.getSearchRange(), monitor);
+
+                            if (nextAddr != null) {
+                                lastFoundAddrXref = nextAddr;
+                                foundAddressesXref.add(nextAddr);
+                            } else {
+                                allSubsequentFoundXref = false;
+                                break; // Stop checking this specific xref path
+                            }
+                        }
+
+                        // If the full sequence was found starting from this xref
+                        if (allSubsequentFoundXref) {
+                             if (annotatedPatternAddresses.add(xrefAddr)) { // Check if xref start already annotated
+                                logger.accept(String.format("Found Keyword group '%s' (XRef from 0x%s) starting at 0x%s (in function %s)\n",
+                                    group.getName(), primaryAddr, xrefAddr, getFunctionName(functionManager.getFunctionContaining(xrefAddr))));
+
+                                // Add Finding, noting it was found via XRef
+                                findings.add(new Finding(xrefAddr, "Keyword Group (XRef)", group.getName(), Severity.HIGH,
+                                        group.getDescription() + " [Found via XRef from " + primaryAddr + "]",
+                                        getFunctionName(functionManager.getFunctionContaining(xrefAddr))));
+
+                                // Annotate differently to indicate XRef find
+                                addBookmark(bookmarkManager, xrefAddr, BOOKMARK_CATEGORY_PATTERN_XREF + ": " + group.getName(),
+                                        group.getDescription() + " [XRef from " + primaryAddr + "]");
+                                setPreComment(listing, xrefAddr, BOOKMARK_CATEGORY_PATTERN_XREF + ": " + group.getName());
+                                setPostComment(listing, xrefAddr, group.getDescription() + " [XRef]");
+                                setBackgroundColor(program, xrefAddr, PATTERN_PRIMARY_COLOR); // Use primary for start
+
+                                // Annotate subsequent parts
+                                for (int i = 1; i < foundAddressesXref.size(); i++) {
+                                     Address subsequentAddr = foundAddressesXref.get(i);
+                                     logger.accept(String.format("  - Keyword '%s' found at 0x%s\n", group.getKeywordByIndex(i), subsequentAddr));
+                                     if (annotatedPatternAddresses.add(subsequentAddr)) {
+                                        addBookmark(bookmarkManager, subsequentAddr, BOOKMARK_CATEGORY_PATTERN_PART + ": " + group.getName() + " (XRef)", "Keyword: " + group.getKeywordByIndex(i));
+                                        setBackgroundColor(program, subsequentAddr, PATTERN_SECONDARY_COLOR);
+                                     }
+                                }
+                                groupsFoundCount++;
+                                foundViaXref = true;
+                                break; // Found via one xref, stop checking other xrefs for this primaryAddr/group combo
+                             }
+                        }
+                    } // End while loop for references
+                } // End if (!foundDirectly)
+
+            } // end loop through potential groups for this primary address
         } // end loop through primary hits
 
-        logger.accept("Keyword pattern search finished. Found " + groupsFoundCount + " matching groups/rules.");
+        logger.accept("Keyword pattern search finished. Found " + groupsFoundCount + " matching groups/rules (Direct + XRef).\n");
     }
 
-    /** Analyzes specific instructions based on the configuration. (Placeholder) */
+    /** Analyzes instruction sequences and patterns based on the configuration. */
     private static void analyzeInstructions(Program program, AntiDebugConfig config, Consumer<String> logger, TaskMonitor monitor, List<Finding> findings) throws CancelledException {
-        if (config.getInstructions().isEmpty()) return; // Skip if no instructions configured
+        List<InstructionRule> instructionRules = config.getInstructionRules();
+        if (instructionRules.isEmpty()) {
+            logger.accept("Skipping Instruction analysis (no rules configured).\n");
+            return; // Skip if no instruction rules configured
+        }
 
-        logger.accept("\n--- Searching for Instructions ---");
+        logger.accept("\n--- Searching for Instruction Patterns ---\n");
         Listing listing = program.getListing();
-        InstructionIterator instructions = listing.getInstructions(true);
-        int foundCount = 0;
+        FunctionManager functionManager = program.getFunctionManager();
+        BookmarkManager bookmarkManager = program.getBookmarkManager();
+        Set<Address> annotatedInstructionAddresses = new HashSet<>(); // Prevent duplicate annotations
 
-        while (instructions.hasNext()) {
-            monitor.checkCancelled();
-            Instruction instruction = instructions.next();
-            String mnemonic = instruction.getMnemonicString().toLowerCase();
+        int rulesFoundCount = 0;
 
-            for (String targetMnemonic : config.getInstructions()) {
-                if (mnemonic.equals(targetMnemonic.toLowerCase())) {
-                    Address addr = instruction.getAddress();
-                    Function func = listing.getFunctionContaining(addr);
-                    String funcName = getFunctionName(func);
-                    String description = config.getRuleDescription(targetMnemonic); // Assuming description key matches mnemonic
+        // Iterate through all functions
+        FunctionIterator functions = functionManager.getFunctions(true);
+        while (functions.hasNext() && !monitor.isCancelled()) {
+            Function func = functions.next();
+            monitor.setMessage("Analyzing function for instruction patterns: " + getFunctionName(func));
 
-                    logger.accept(String.format("Found instruction '%s' at 0x%s (in function %s)",
-                            instruction.toString(), addr, funcName));
+            // Iterate through all instructions within the function
+            InstructionIterator instructions = listing.getInstructions(func.getBody(), true);
+            while (instructions.hasNext() && !monitor.isCancelled()) {
+                Instruction currentInstruction = instructions.next();
+                Address currentAddr = currentInstruction.getAddress();
 
-                    // Add Finding
-                    findings.add(new Finding(addr, "Instruction", targetMnemonic, description, funcName));
+                // Check if this address was already annotated as the start of a sequence
+                if (annotatedInstructionAddresses.contains(currentAddr)) {
+                    continue;
+                }
 
-                    // Annotate
-                    addBookmark(program.getBookmarkManager(), addr, BOOKMARK_CATEGORY_INSTRUCTION, targetMnemonic + " - " + description);
-                    setBackgroundColor(program, addr, PATTERN_PRIMARY_COLOR); // Reuse color for now
-                    foundCount++;
-                    break; // Move to next instruction
+                // For each instruction, check if it's the start of any defined instruction rule sequence
+                for (InstructionRule rule : instructionRules) {
+                    monitor.checkCancelled(); // Check per rule
+
+                    // Attempt to match the instruction sequence starting from the current instruction
+                    if (matchInstructionSequence(program, listing, currentInstruction, rule, monitor)) {
+                        String funcName = getFunctionName(func);
+                        String description = config.getRuleDescription(rule.getName());
+
+                        logger.accept(String.format("Found Instruction Rule '%s' starting at 0x%s (in function %s)\n",
+                            rule.getName(), currentAddr, funcName));
+
+                        // Add Finding for the start of the sequence
+                        findings.add(new Finding(currentAddr, "Instruction Sequence", rule.getName(), Severity.HIGH, description, funcName));
+
+                        // Annotate the starting instruction
+                        addBookmark(bookmarkManager, currentAddr, BOOKMARK_CATEGORY_INSTRUCTION + ": " + rule.getName(), description);
+                        setPreComment(listing, currentAddr, BOOKMARK_CATEGORY_INSTRUCTION + ": " + rule.getName());
+                        setPostComment(listing, currentAddr, description);
+                        setBackgroundColor(program, currentAddr, INSTRUCTION_COLOR);
+                        annotatedInstructionAddresses.add(currentAddr); // Mark as annotated
+
+                        rulesFoundCount++;
+                        // Found a match starting here, break inner loop (don't check other rules starting at same addr)
+                        break;
+                    }
                 }
             }
         }
-        logger.accept("Instruction search finished. Found " + foundCount + " matches.");
+
+        logger.accept("Instruction pattern search finished. Found " + rulesFoundCount + " matching rules.\n");
     }
 
-    /** Analyzes byte sequences based on the configuration. (Placeholder) */
-    private static void analyzeBytes(Program program, AntiDebugConfig config, Consumer<String> logger, TaskMonitor monitor, List<Finding> findings) throws CancelledException {
-        if (config.getByteSequences().isEmpty()) return; // Skip if no byte sequences configured
+    /**
+     * Attempts to match a configured instruction sequence rule starting from a given instruction.
+     * (Includes corrected operand checking logic)
+     */
+    private static boolean matchInstructionSequence(Program program, Listing listing, Instruction startInstruction, InstructionRule rule, TaskMonitor monitor) throws CancelledException {
+        Instruction currentInstruction = startInstruction;
+        for (InstructionStep step : rule.getSteps()) {
+            monitor.checkCancelled();
 
-        logger.accept("\n--- Searching for Byte Sequences ---");
+            if (currentInstruction == null) {
+                return false; // Reached end of instruction stream before matching all steps
+            }
+
+            // 1. Check Mnemonic (Case-insensitive)
+            if (!currentInstruction.getMnemonicString().equalsIgnoreCase(step.getMnemonic())) {
+                return false; // Mnemonic doesn't match
+            }
+
+            // 2. Check Operand Constraints
+            for (OperandCheck check : step.getOperandChecks()) {
+                monitor.checkCancelled();
+                int opIndex = check.getOperandIndex();
+                if (opIndex >= currentInstruction.getNumOperands()) {
+                    return false; // Rule requires an operand that doesn't exist
+                }
+
+                boolean operandMatches = false;
+                switch (check.getCheckType()) {
+                    case REG:
+                        Register reg = currentInstruction.getRegister(opIndex);
+                        if (reg != null && reg.getName().equalsIgnoreCase(check.getValue())) {
+                            operandMatches = true;
+                        }
+                        break;
+                    case VAL:
+                        Scalar scalar = currentInstruction.getScalar(opIndex);
+                        if (scalar != null) {
+                            try {
+                                long checkValue;
+                                String valStr = check.getValue().toLowerCase();
+                                if (valStr.startsWith("0x")) {
+                                    checkValue = NumericUtilities.parseHexLong(valStr);
+                                } else if (valStr.startsWith("-")) {
+                                    checkValue = Long.parseLong(valStr);
+                                } else {
+                                    checkValue = Long.parseUnsignedLong(valStr);
+                                }
+                                if (scalar.getSignedValue() == checkValue || scalar.getUnsignedValue() == checkValue) {
+                                    operandMatches = true;
+                                }
+                            } catch (NumberFormatException e) {
+                                Msg.warn(AntiDebugAnalysisCore.class, String.format("Invalid VAL format '%s' for rule '%s' at %s. Check config.",
+                                        check.getValue(), rule.getName(), currentInstruction.getAddress()));
+                            }
+                        }
+                        break;
+                    case TYPE:
+                        int opType = currentInstruction.getOperandType(opIndex);
+                        String typeStr = OperandType.toString(opType);
+                        if (typeStr.equalsIgnoreCase(check.getValue())) {
+                            operandMatches = true;
+                        }
+                        break;
+                    default:
+                         Msg.error(AntiDebugAnalysisCore.class, "Unsupported OperandCheck.CheckType encountered: " + check.getCheckType());
+                         break;
+                }
+
+                if (!operandMatches) {
+                    return false; // Operand check failed for this step
+                }
+            } // End operand checks loop
+
+            // Move to the next instruction for the next step
+            currentInstruction = currentInstruction.getNext();
+
+        } // End steps loop
+
+        // If we successfully matched all steps in the rule
+        return true;
+    }
+
+
+    /** Analyzes byte sequences based on the configuration. */
+    private static void analyzeBytes(Program program, AntiDebugConfig config, Consumer<String> logger, TaskMonitor monitor, List<Finding> findings) throws CancelledException {
+        List<String> byteSequences = config.getByteSequences();
+        if (byteSequences.isEmpty()) {
+             logger.accept("Skipping Byte Sequence analysis (no sequences configured).\n");
+             return;
+        }
+
+        logger.accept("\n--- Searching for Byte Sequences ---\n");
         Memory memory = program.getMemory();
         Listing listing = program.getListing();
+        BookmarkManager bookmarkManager = program.getBookmarkManager();
+        Set<Address> annotatedByteAddresses = new HashSet<>(); // Prevent duplicate annotations
         int foundCount = 0;
 
-        for (String byteSequenceHex : config.getByteSequences()) {
+        for (String byteSequenceHex : byteSequences) {
              monitor.checkCancelled();
              monitor.setMessage("Bytes: " + byteSequenceHex);
              byte[] searchBytes;
              try {
-                 searchBytes = NumericUtilities.convertHexStringToBytes(byteSequenceHex.replaceAll("\\s", "")); // Remove spaces
+                 searchBytes = NumericUtilities.convertHexStringToBytes(byteSequenceHex.replaceAll("\\s", ""));
                  if (searchBytes.length == 0) {
                      Msg.warn(AntiDebugAnalysisCore.class, "Empty byte sequence configured: " + byteSequenceHex);
                      continue;
                  }
              } catch (NumberFormatException e) {
                  Msg.error(AntiDebugAnalysisCore.class, "Invalid hex string in config: " + byteSequenceHex, e);
-                 continue; // Skip invalid sequence
+                 continue;
              }
 
+             // Search through all memory blocks
              Address startAddr = program.getMinAddress();
              while (startAddr != null && !monitor.isCancelled()) {
                  Address foundAddr = memory.findBytes(startAddr, searchBytes, null, true, monitor);
                  if (foundAddr == null) {
-                     break; // No more occurrences found
+                     break;
                  }
 
-                 Function func = listing.getFunctionContaining(foundAddr);
-                 String funcName = getFunctionName(func);
-                 String description = config.getRuleDescription(byteSequenceHex); // Assuming description key matches hex string
+                 // Check if already annotated
+                 if (annotatedByteAddresses.add(foundAddr)) {
+                     Function func = listing.getFunctionContaining(foundAddr);
+                     String funcName = getFunctionName(func);
+                     String ruleName = byteSequenceHex;
+                     String description = config.getRuleDescription(ruleName);
 
-                 logger.accept(String.format("Found byte sequence '%s' at 0x%s (in function %s)",
-                         byteSequenceHex, foundAddr, funcName));
+                     logger.accept(String.format("Found byte sequence '%s' at 0x%s (in function %s)\n",
+                             byteSequenceHex, foundAddr, funcName));
 
-                 // Add Finding
-                 findings.add(new Finding(foundAddr, "Bytes", byteSequenceHex, description, funcName));
+                     findings.add(new Finding(foundAddr, "Bytes", ruleName, Severity.LOW, description, funcName));
 
-                 // Annotate
-                 addBookmark(program.getBookmarkManager(), foundAddr, BOOKMARK_CATEGORY_BYTES, byteSequenceHex + " - " + description);
-                 setBackgroundColor(program, foundAddr, PATTERN_PRIMARY_COLOR); // Reuse color
-                 foundCount++;
+                     addBookmark(bookmarkManager, foundAddr, BOOKMARK_CATEGORY_BYTES, ruleName + " - " + description);
+                     setBackgroundColor(program, foundAddr, BYTES_COLOR);
+                     setPreComment(listing, foundAddr, BOOKMARK_CATEGORY_BYTES + ": " + ruleName);
+                     if (!description.equals(config.getRuleDescription(""))) {
+                        setPostComment(listing, foundAddr, description);
+                     }
+                     foundCount++;
+                 }
 
-                 // Prepare for next search
+                 // Prepare for the next search *after* the current find
                  try {
                     startAddr = foundAddr.addNoWrap(1);
                  } catch (AddressOverflowException e) {
-                     startAddr = null; // Stop searching if we overflow
+                     startAddr = null;
                  }
              } // end while occurrences
         } // end for each sequence
-        logger.accept("Byte sequence search finished. Found " + foundCount + " matches.");
+        logger.accept("Byte sequence search finished. Found " + foundCount + " matches.\n");
     }
 
 
@@ -458,82 +718,50 @@ public class AntiDebugAnalysisCore {
     // Keyword Searching Helpers
     // =====================================================================================
 
-    /** Checks if a keyword is found in a CodeUnit (Instruction or Label). */
+    /** Checks if a keyword is found in a CodeUnit (Instruction or Data). Handles mnemonics, operands, and labels. */
     private static boolean isKeywordFound(CodeUnit cu, String keyword, Program program) {
         if (cu == null || keyword == null || keyword.isEmpty()) {
             return false;
         }
-        // Search in Instructions (Mnemonic and Operands)
-        if (searchInInstructions(cu, keyword, program)) {
-            return true;
-        }
-        // Search in Labels at the CodeUnit's address
-        return searchInLabels(cu.getAddress(), keyword, program);
-    }
 
-    /** Searches within an instruction's mnemonic and operands. */
-    private static boolean searchInInstructions(CodeUnit cu, String keyword, Program program) {
-        if (!(cu instanceof Instruction ins)) { // Java 16+ pattern matching
-            return false;
-        }
-
-        // Check Mnemonic (Case-insensitive)
-        if (ins.getMnemonicString().equalsIgnoreCase(keyword)) {
-            return true;
-        }
-
-        // Check Operands
-        for (int i = 0; i < ins.getNumOperands(); i++) {
-            // Check simple string representation first (Case-insensitive for non-hex)
-            String opRep = ins.getDefaultOperandRepresentation(i);
-            boolean keywordIsHex = keyword.toLowerCase().startsWith("0x");
-
-            if (opRep != null) {
-                 if (keywordIsHex) {
-                     // Exact match for hex values (case-insensitive hex)
-                     if (opRep.equalsIgnoreCase(keyword)) return true;
-                 } else {
-                     // Contains check for non-hex (case-insensitive)
-                     if (opRep.toLowerCase().contains(keyword.toLowerCase())) return true;
-                 }
+        // 1. Check Instruction Mnemonic and Operands
+        if (cu instanceof Instruction ins) {
+            if (ins.getMnemonicString().equalsIgnoreCase(keyword)) {
+                return true;
             }
-
-            // Check underlying operand objects (Symbols, Scalars)
-            Object[] opObjects = ins.getOpObjects(i);
-            for (Object operand : opObjects) {
-                if (operand instanceof Address addr) { // Pattern matching
-                    // Check symbols at the operand address
-                    Symbol[] symbols = program.getSymbolTable().getSymbols(addr);
-                    for (Symbol symbol : symbols) {
-                        if (symbol.getName().contains(keyword)) { // Symbol names might be case-sensitive
-                            return true;
-                        }
-                    }
-                } else if (operand instanceof Scalar scalar) { // Pattern matching
-                    // Check scalar value (match hex case-insensitively)
-                    String scalarHex = "0x" + Long.toHexString(scalar.getUnsignedValue());
-                     if (keywordIsHex && scalarHex.equalsIgnoreCase(keyword)) {
-                        return true;
-                    }
-                    // Optional: Check decimal representation if keyword is numeric but not hex
-                    // if (!keywordIsHex && Character.isDigit(keyword.charAt(0))) {
-                    //    try {
-                    //        long keyVal = Long.parseLong(keyword);
-                    //        if (scalar.getValue() == keyVal) return true;
-                    //    } catch (NumberFormatException e) { /* Ignore if keyword not decimal */ }
-                    // }
+            for (int i = 0; i < ins.getNumOperands(); i++) {
+                boolean keywordIsHex = keyword.toLowerCase().startsWith("0x");
+                Register reg = ins.getRegister(i);
+                if (reg != null && reg.getName().equalsIgnoreCase(keyword)) {
+                    return true;
+                }
+                Scalar scalar = ins.getScalar(i);
+                if (scalar != null && keywordIsHex) {
+                     try {
+                         long keywordVal = NumericUtilities.parseHexLong(keyword);
+                         if (scalar.getUnsignedValue() == keywordVal || scalar.getSignedValue() == keywordVal) {
+                             return true;
+                         }
+                     } catch (NumberFormatException e) { /* ignore */ }
+                }
+                String opRep = ins.getDefaultOperandRepresentation(i);
+                if (opRep != null) {
+                     if (!keywordIsHex && opRep.toLowerCase().contains(keyword.toLowerCase())) {
+                         return true;
+                     }
+                     if (keywordIsHex && opRep.equalsIgnoreCase(keyword)) {
+                         return true;
+                     }
                 }
             }
         }
-        return false;
-    }
+        // 2. Check Data (Optional - currently disabled for performance/focus)
+        // else if (cu instanceof Data data) { ... }
 
-    /** Searches for the keyword in labels at the given address. */
-    private static boolean searchInLabels(Address address, String keyword, Program program) {
+        // 3. Check Labels at the CodeUnit's address
         SymbolTable symbolTable = program.getSymbolTable();
-        Symbol[] symbols = symbolTable.getSymbols(address);
+        Symbol[] symbols = symbolTable.getSymbols(cu.getAddress());
         for (Symbol symbol : symbols) {
-            // Case-insensitive label matching might be desirable
             if (symbol.getName().toLowerCase().contains(keyword.toLowerCase())) {
                 return true;
             }
@@ -541,41 +769,28 @@ public class AntiDebugAnalysisCore {
         return false;
     }
 
-     /**
-      * Finds the *first* occurrence of the keyword within the specified range,
-      * starting the search *strictly after* the startAddress.
-      *
-      * @param program      The current program.
-      * @param listing      The program listing.
-      * @param startAddress The address *after* which to start searching.
-      * @param keyword      The keyword to find.
-      * @param range        The maximum number of bytes to search forward.
-      * @param monitor      The task monitor.
-      * @return The address of the first occurrence, or null if not found or error occurs.
-      * @throws CancelledException If cancelled.
-      */
+
+     /** Finds the *first* occurrence of the keyword within the specified byte range, starting search *at or after* startAddress. */
     private static Address findKeywordInRange(Program program, Listing listing, Address startAddress, String keyword, int range, TaskMonitor monitor) throws CancelledException {
         if (startAddress == null || keyword == null || keyword.isEmpty() || range <= 0) {
             return null;
         }
 
-        Address currentAddr = startAddress; // Start searching from the address *after* the previous hit
+        Address currentSearchAddr = startAddress;
         Address maxSearchAddr;
         Address maxProgAddr = program.getMaxAddress();
 
         try {
-            // Calculate the maximum address to search, preventing overflow
-            maxSearchAddr = startAddress.addNoWrap(range - 1); // range includes the start byte, so add range-1
+            maxSearchAddr = startAddress.addNoWrap(range - 1);
              if (maxSearchAddr.compareTo(maxProgAddr) > 0) {
                 maxSearchAddr = maxProgAddr;
             }
         } catch (AddressOverflowException e) {
-            maxSearchAddr = maxProgAddr; // Search till the end if range calculation overflows
+            maxSearchAddr = maxProgAddr;
         }
 
-        // Iterate through code units in the calculated range
-        AddressSet searchSet = new AddressSet(startAddress, maxSearchAddr);
-        CodeUnitIterator codeUnits = listing.getCodeUnits(searchSet, true); // Forward search
+        // Get code units starting *at* startAddress within the range
+        CodeUnitIterator codeUnits = listing.getCodeUnits(new AddressSet(startAddress, maxSearchAddr), true);
 
         while (codeUnits.hasNext() && !monitor.isCancelled()) {
             CodeUnit cu = codeUnits.next();
@@ -583,8 +798,7 @@ public class AntiDebugAnalysisCore {
                 return cu.getAddress(); // Found it
             }
         }
-
-        return null; // Not found within the range
+        return null; // Not found
     }
 
 
@@ -595,7 +809,6 @@ public class AntiDebugAnalysisCore {
     /** Adds a bookmark with category and comment. */
     private static void addBookmark(BookmarkManager bookmarkManager, Address addr, String category, String comment) {
         if (bookmarkManager == null || addr == null || category == null || comment == null) return;
-        // Avoid overly long comments if necessary, Ghidra might truncate anyway
         String shortComment = comment.length() > 200 ? comment.substring(0, 197) + "..." : comment;
         try {
              bookmarkManager.setBookmark(addr, BookmarkType.ANALYSIS, category, shortComment);
@@ -611,11 +824,15 @@ public class AntiDebugAnalysisCore {
             CodeUnit cu = listing.getCodeUnitAt(address);
             if (cu != null) {
                 String existing = cu.getComment(CodeUnit.PRE_COMMENT);
-                String newComment = (existing == null || existing.isBlank()) ? comment : existing + "\n" + comment;
-                // Avoid duplicate comments if run multiple times
-                if (existing == null || !existing.contains(comment)) {
-                    cu.setComment(CodeUnit.PRE_COMMENT, newComment.trim());
+                String newComment;
+                if (existing == null || existing.isBlank()) {
+                    newComment = comment;
+                } else if (!existing.contains(comment)) {
+                    newComment = existing + "\n" + comment;
+                } else {
+                    return; // Comment already exists
                 }
+                cu.setComment(CodeUnit.PRE_COMMENT, newComment.trim());
             }
         } catch (Exception e) {
              Msg.error(AntiDebugAnalysisCore.class, "Error setting pre-comment at " + address + ": " + e.getMessage(), e);
@@ -629,10 +846,15 @@ public class AntiDebugAnalysisCore {
             CodeUnit cu = listing.getCodeUnitAt(address);
             if (cu != null) {
                 String existing = cu.getComment(CodeUnit.POST_COMMENT);
-                String newComment = (existing == null || existing.isBlank()) ? comment : existing + "\n" + comment;
-                 if (existing == null || !existing.contains(comment)) {
-                    cu.setComment(CodeUnit.POST_COMMENT, newComment.trim());
-                 }
+                String newComment;
+                if (existing == null || existing.isBlank()) {
+                    newComment = comment;
+                } else if (!existing.contains(comment)) {
+                    newComment = existing + "\n" + comment;
+                } else {
+                    return; // Comment already exists
+                }
+                cu.setComment(CodeUnit.POST_COMMENT, newComment.trim());
             }
          } catch (Exception e) {
              Msg.error(AntiDebugAnalysisCore.class, "Error setting post-comment at " + address + ": " + e.getMessage(), e);
@@ -643,85 +865,33 @@ public class AntiDebugAnalysisCore {
     private static void setBackgroundColor(Program program, Address address, Color color) {
         if (program == null || address == null || color == null) return;
          try {
-             BackgroundColorModel colorModel = program.getBackgroundColorModel();
+             ServiceProvider serviceProvider = null;
+             // Attempt to get the tool context if available (e.g., running as plugin)
+             if (program.getDomainFile() != null && program.getDomainFile().getTool() != null) {
+                 serviceProvider = program.getDomainFile().getTool();
+             }
+
+             BackgroundColorModel colorModel = null;
+             if(serviceProvider != null) {
+                 colorModel = serviceProvider.getService(BackgroundColorModel.class);
+             }
+
              if (colorModel != null) {
                   colorModel.setBackgroundColor(address, address, color);
              } else {
-                 Msg.warn(AntiDebugAnalysisCore.class, "BackgroundColorModel service not available.");
+                 // Only warn if we might have expected it
+                 if (serviceProvider != null) {
+                    Msg.warn(AntiDebugAnalysisCore.class, "BackgroundColorModel service not available. Cannot set background color.");
+                 } // else: likely running headless/script without GUI tool, don't warn
              }
          } catch (Exception e) {
+             // Catch broader exceptions as getTool() or getService() might throw them
              Msg.error(AntiDebugAnalysisCore.class, "Error setting background color at " + address + ": " + e.getMessage(), e);
          }
     }
 
-    /** Safely gets the function name or "N/A". */
+    /** Safely gets the function name including namespace or "N/A". */
     private static String getFunctionName(Function func) {
-        return (func != null) ? func.getName(true) : "N/A"; // Include namespace
-    }
-
-
-    // =====================================================================================
-    // CSV Result Writer (New Feature)
-    // =====================================================================================
-    private static class CsvResultWriter {
-
-        private static final String CSV_HEADER = "Address,Type,RuleName,FunctionContext,Description";
-
-        /**
-         * Writes the list of findings to a CSV file.
-         * Creates parent directories if they don't exist.
-         * Overwrites the file if it already exists.
-         *
-         * @param outputPath The path to the output CSV file.
-         * @param findings The list of findings to write.
-         * @throws IOException If an I/O error occurs during writing.
-         */
-        public static void writeResults(Path outputPath, List<Finding> findings) throws IOException {
-            Objects.requireNonNull(outputPath, "CSV output path cannot be null");
-            Objects.requireNonNull(findings, "Findings list cannot be null");
-
-            // Create parent directories if needed
-            Path parentDir = outputPath.getParent();
-            if (parentDir != null && !Files.exists(parentDir)) {
-                Files.createDirectories(parentDir);
-                Msg.info(CsvResultWriter.class, "Created directory for CSV output: " + parentDir);
-            }
-
-            try (PrintWriter writer = new PrintWriter(new BufferedWriter(new FileWriter(outputPath.toFile())))) {
-                // Write Header
-                writer.println(CSV_HEADER);
-
-                // Write Data Rows
-                for (Finding finding : findings) {
-                    writer.println(formatCsvRow(finding));
-                }
-                writer.flush(); // Ensure data is written
-            }
-            // Catch specific IO exceptions if needed for finer control
-        }
-
-        /** Formats a Finding object into a CSV-safe string row. */
-        private static String formatCsvRow(Finding finding) {
-            return String.join(",",
-                quoteCsv(finding.address().toString()), // Address usually doesn't need quoting, but be safe
-                quoteCsv(finding.type()),
-                quoteCsv(finding.ruleName()),
-                quoteCsv(finding.functionContext()),
-                quoteCsv(finding.description())
-            );
-        }
-
-        /** Quotes a string for CSV, handling commas, quotes, and newlines. */
-        private static String quoteCsv(String value) {
-            if (value == null) {
-                return "\"\"";
-            }
-            // Basic CSV quoting: escape double quotes and wrap in double quotes if necessary
-            String escapedValue = value.replace("\"", "\"\"");
-            if (value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r")) {
-                return "\"" + escapedValue + "\"";
-            }
-            return escapedValue; // No quoting needed
-        }
+        return (func != null) ? func.getName(true) : "N/A";
     }
 }
