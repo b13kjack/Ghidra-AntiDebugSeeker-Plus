@@ -30,19 +30,6 @@ It can be used in two ways:
 
 You'll need the following files depending on your usage method:
 
-<<<<<<< HEAD
-
-## Understanding the Provided Rule Files (`rule_files` directory)
-
-The `rule_files` directory in this repository contains example rule definition (`.config`) and description (`.json`) files. You may find different versions or sets of these files in subdirectories like:
-
-*   `rule_files/config/` and `rule_files/json/`
-*   `rule_files/20241021_UPDATE/`
-
-When the script or plugin prompts you to "Select the Configuration File" and "Select the JSON Description File", you should navigate to the `rule_files` directory (or wherever you have stored your desired rule files) and choose the specific `.config` and `.json` files you wish to use for the analysis. You can use the provided files as a starting point or create your own custom versions.
-
-## anti_debug_Ghidra.config and anti_debug_techniques_descriptions_Ghidra.json 
-=======
 1.  **Usage Mode Files:**
     * **Script:** `AntiDebugSeeker.java`
     * **Extension:** `ghidra_11.0.1_AntiDebugSeeker.zip` (Contains the compiled plugin)
@@ -50,7 +37,6 @@ When the script or plugin prompts you to "Select the Configuration File" and "Se
     * `anti_debug_Ghidra.config` - Defines the detection rules (APIs and techniques).
 3.  **Description File:**
     * `anti_debug_techniques_descriptions_Ghidra.json` - Contains descriptions for technique-based rules, shown in comments.
->>>>>>> f08b85678568836945d54d84892f993eea4e807d
 
 ## Configuration Files
 
